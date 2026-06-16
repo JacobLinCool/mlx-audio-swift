@@ -1,6 +1,6 @@
 # OmniVoice
 
-Swift/MLX port of [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice), a multilingual zero-shot TTS model: a bidirectional diffusion LM over a Qwen3 backbone (28 layers, 1024 hidden) generating 8 RVQ codebooks at 24 kHz, decoded by a HiggsAudioV2 acoustic codec.
+Swift/MLX port of [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice), a multilingual zero-shot TTS model: a bidirectional diffusion LM over a Qwen3 backbone (28 layers, 1024 hidden) generating 9 RVQ codebooks at 24 kHz, decoded by a HiggsAudioV2 acoustic codec.
 
 ## Weights
 
@@ -37,11 +37,11 @@ Generation knobs live in `OmniVoiceGenerateParameters` (`numStep`, `guidanceScal
 
 - **Auto voice** (`voice: nil`) — works
 - **Voice design** (`voice: "female, low pitch, ..."`) — works
-- **Voice cloning** (`refAudio` + `refText`) — incomplete: the HiggsAudioV2
-  semantic encode path (HuBERT + SemanticEncoder + fusion projection) is not
-  ported yet, so reference audio is tokenized through an acoustic-only
-  approximation and the cloned voice will not match the reference. Semantic
-  weights are dropped at load time until the port lands.
+- **Voice cloning** (`refAudio` + `refText`) — works. Reference audio is
+  encoded through the full HiggsAudioV2 semantic path (HuBERT + SemanticEncoder
+  + fusion projection + residual RVQ). Requires the full `mlx-community/OmniVoice`
+  checkpoint; the `-bf16` variant strips `semantic_model.*` and cannot encode
+  reference audio.
 
 ## Implementation notes
 
