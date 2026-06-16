@@ -32,9 +32,6 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
     /// Each projects hidden states to codebook logits: [hiddenSize, audioVocabSize]
     @ModuleInfo(key: "audio_heads") var audioHeads: [Linear]
 
-    /// Normalized codebook weights for loss computation
-    private var normalizedCodebookWeights: [Float]
-
     public var tokenizer: Tokenizers.Tokenizer?
     var audioTokenizer: OmniVoiceAudioTokenizer?
 
@@ -48,8 +45,6 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
             repetitionPenalty: 1.05
         )
     }
-
-    // MARK: - OmniVoice-specific defaults (unused; parameters are passed via generate())
 
     // MARK: - Initialization
 
@@ -83,10 +78,6 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
         self._audioHeads.wrappedValue = (0..<config.numAudioCodebook).map { _ in
             Linear(inputDimensions: llmConfig.hiddenSize, outputDimensions: config.audioVocabSize, bias: false)
         }
-
-        // Normalized codebook weights
-        let totalWeight = config.audioCodebookWeights.reduce(0, +)
-        self.normalizedCodebookWeights = config.audioCodebookWeights.map { Float($0) / Float(totalWeight) }
     }
 
     // MARK: - Forward Pass
@@ -142,10 +133,10 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
 
         // Run through LLM. OmniVoice is a bidirectional NAR diffusion model:
         // the default must be NO attention mask (matching the Python reference,
-        // which never applies a causal mask). NOTE: call sites passing
-        // `attentionMask: .none` actually pass Optional.none (nil) because the
-        // parameter is Optional — which previously fell through to a CAUSAL
-        // mask here and garbled generation.
+        // which never applies a causal mask). Call sites pass `nil` (Optional.none),
+        // which this `?? .none` resolves to the no-mask enum case. Passing the
+        // enum `.none` literally would be ambiguous with Optional.none and once
+        // fell through to a CAUSAL mask here, garbling generation.
         let mask: MLXFast.ScaledDotProductAttentionMaskMode = attentionMask ?? .none
         let hiddenStates = llm.forwardWithEmbeddings(
             inputsEmbeds: inputsEmbeds,
@@ -157,7 +148,7 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
         let batchSize = hiddenStates.shape[0]
         let seqLen = hiddenStates.shape[1]
         var logitsPerCodebook: [MLXArray] = []
-        for (i, head) in audioHeads.enumerated() {
+        for head in audioHeads {
             let logits = head(hiddenStates)  // [B, S, V]
             let reshaped = logits.reshaped([batchSize, seqLen, 1, config.audioVocabSize])
             logitsPerCodebook.append(reshaped)
@@ -336,7 +327,7 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
         let numCodebooks = config.numAudioCodebook
         let targetLen = numTargetTokens
 
-        
+
         // Unconditional input: only the target region (matching Python reference)
         let prefixLen = condLength - targetLen
         var uncondInputIds = inputIds[0..., 0..., prefixLen...]  // [1, C, T]
@@ -453,12 +444,12 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
             let finalCondLogits = forward(
                 inputIds: inputIds,
                 audioMask: audioMask,
-                attentionMask: .none
+                attentionMask: nil
             ).asType(.float32)
             let finalULogitsFull = forward(
                 inputIds: uncondInputIds,
                 audioMask: uncondAudioMask,
-                attentionMask: .none
+                attentionMask: nil
             ).asType(.float32)
             let finalC = finalCondLogits[0, (condLength - targetLen)..<condLength, 0..., 0...]
                 .transposed(1, 0, 2).reshaped([1, numCodebooks, targetLen, config.audioVocabSize])
@@ -475,13 +466,13 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
 
         // 8. Decode tokens to waveform
         var outputTokens = tokens[0, 0..., 0..<targetLen]
-        
+
         // Replace any remaining mask tokens with 0 (matching Python reference)
         let remainingMask = outputTokens .== Int32(config.audioMaskId)
         if remainingMask.any().item(Bool.self) {
             outputTokens = MLX.where(remainingMask, MLXArray.zeros(outputTokens.shape, type: Int32.self), outputTokens)
         }
-        
+
         let audio = try audioTok.decode(outputTokens)
 
         // 9. Post-process
@@ -567,13 +558,6 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
             steps.append(shifted)
         }
         return steps
-    }
-
-    private func makeCausalMask(length: Int) -> MLXArray {
-        // Lower triangular matrix
-        let rowIdx = MLXArray((0..<length).map { Int32($0) }).reshaped([length, 1])
-        let colIdx = MLXArray((0..<length).map { Int32($0) }).reshaped([1, length])
-        return (rowIdx .>= colIdx)
     }
 
     private func estimateTargetTokens(
@@ -710,7 +694,7 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
         instruct: String?,
         denoise: Bool
     ) throws -> (inputIds: MLXArray, audioMask: MLXArray) {
-        guard let tokenizer else {
+        guard tokenizer != nil else {
             throw AudioGenerationError.modelNotInitialized("Tokenizer not loaded")
         }
 
@@ -779,7 +763,7 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
             audioStartIdx = totalLength - numTargetTokens
         }
 
-        
+
         let zerosPrefix = MLXArray.zeros([audioStartIdx], type: Bool.self)
         let onesSuffix = MLXArray.ones([totalLength - audioStartIdx], type: Bool.self)
         let condAudioMask = MLX.concatenated([zerosPrefix, onesSuffix], axis: 0)
@@ -792,7 +776,7 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
         guard let tokenizer else {
             throw AudioGenerationError.modelNotInitialized("Tokenizer not loaded")
         }
-        return try tokenizer.encode(text: text, addSpecialTokens: false)
+        return tokenizer.encode(text: text, addSpecialTokens: false)
     }
 
     private func combineText(refText: String?, text: String) -> String {
@@ -1114,8 +1098,8 @@ func snakeActivation(_ x: MLXArray) -> MLXArray {
 public final class OmniVoiceDACResidualUnit: Module {
     @ModuleInfo(key: "conv1") var conv1: OmniVoiceConv1d
     @ModuleInfo(key: "conv2") var conv2: OmniVoiceConv1d
-    @ModuleInfo(key: "snake1") var snake1: snakeAlpha
-    @ModuleInfo(key: "snake2") var snake2: snakeAlpha
+    @ModuleInfo(key: "snake1") var snake1: SnakeAlpha
+    @ModuleInfo(key: "snake2") var snake2: SnakeAlpha
 
     init(channels: Int, kernelSize: Int, dilation: Int) {
         // Match PyTorch DAC: kernel_size=7 for conv1 with dilation-dependent same-padding,
@@ -1140,8 +1124,8 @@ public final class OmniVoiceDACResidualUnit: Module {
             stride: 1,
             padding: conv2Padding
         )
-        self._snake1.wrappedValue = snakeAlpha(channels: channels)
-        self._snake2.wrappedValue = snakeAlpha(channels: channels)
+        self._snake1.wrappedValue = SnakeAlpha(channels: channels)
+        self._snake2.wrappedValue = SnakeAlpha(channels: channels)
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -1150,7 +1134,7 @@ public final class OmniVoiceDACResidualUnit: Module {
         let c1 = conv1(s1)
         let s2 = snake2.callAsFunction(c1)
         let h = conv2(s2)
-        
+
         // Handle potential length mismatch for residual connection
         let xLen = x.shape[2]
         let hLen = h.shape[2]
@@ -1168,7 +1152,7 @@ public final class OmniVoiceDACResidualUnit: Module {
 }
 
 /// Learnable Snake activation parameter.
-public final class snakeAlpha: Module {
+public final class SnakeAlpha: Module {
     @ModuleInfo(key: "alpha") var alpha: MLXArray
 
     init(channels: Int) {
@@ -1189,23 +1173,23 @@ public final class snakeAlpha: Module {
 /// DAC downsampling block (Higgs Audio V2 EncoderBlock):
 /// 3 ResidualUnits(dilation 1,3,9) + Snake1d + WNConv1d.
 public final class OmniVoiceDACDownBlock: Module {
-    @ModuleInfo var res_unit1: OmniVoiceDACResidualUnit
-    @ModuleInfo var res_unit2: OmniVoiceDACResidualUnit
-    @ModuleInfo var res_unit3: OmniVoiceDACResidualUnit
-    @ModuleInfo(key: "snake1") var snake1: snakeAlpha
+    @ModuleInfo(key: "res_unit1") var resUnit1: OmniVoiceDACResidualUnit
+    @ModuleInfo(key: "res_unit2") var resUnit2: OmniVoiceDACResidualUnit
+    @ModuleInfo(key: "res_unit3") var resUnit3: OmniVoiceDACResidualUnit
+    @ModuleInfo(key: "snake1") var snake1: SnakeAlpha
     @ModuleInfo(key: "conv1") var conv1: OmniVoiceConv1d
 
     init(inputChannels: Int, outputChannels: Int, stride: Int, kernelSize: Int) {
-        self._res_unit1.wrappedValue = OmniVoiceDACResidualUnit(
+        self._resUnit1.wrappedValue = OmniVoiceDACResidualUnit(
             channels: inputChannels, kernelSize: kernelSize, dilation: 1
         )
-        self._res_unit2.wrappedValue = OmniVoiceDACResidualUnit(
+        self._resUnit2.wrappedValue = OmniVoiceDACResidualUnit(
             channels: inputChannels, kernelSize: kernelSize, dilation: 3
         )
-        self._res_unit3.wrappedValue = OmniVoiceDACResidualUnit(
+        self._resUnit3.wrappedValue = OmniVoiceDACResidualUnit(
             channels: inputChannels, kernelSize: kernelSize, dilation: 9
         )
-        self._snake1.wrappedValue = snakeAlpha(channels: inputChannels)
+        self._snake1.wrappedValue = SnakeAlpha(channels: inputChannels)
         self._conv1.wrappedValue = OmniVoiceConv1d(
             inChannels: inputChannels,
             outChannels: outputChannels,
@@ -1216,9 +1200,9 @@ public final class OmniVoiceDACDownBlock: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var h = res_unit1(x)
-        h = res_unit2(h)
-        h = res_unit3(h)
+        var h = resUnit1(x)
+        h = resUnit2(h)
+        h = resUnit3(h)
         h = snake1.callAsFunction(h)
         h = conv1(h)
         return h
@@ -1228,14 +1212,14 @@ public final class OmniVoiceDACDownBlock: Module {
 /// DAC upsampling block (Higgs Audio V2 DecoderBlock):
 /// Snake1d + ConvTranspose1d + 3 ResidualUnits(dilation 1,3,9).
 public final class OmniVoiceDACUpBlock: Module {
-    @ModuleInfo(key: "snake1") var snake1: snakeAlpha
+    @ModuleInfo(key: "snake1") var snake1: SnakeAlpha
     @ModuleInfo(key: "conv_t1") var convT1: OmniVoiceConvTranspose1d
-    @ModuleInfo var res_unit1: OmniVoiceDACResidualUnit
-    @ModuleInfo var res_unit2: OmniVoiceDACResidualUnit
-    @ModuleInfo var res_unit3: OmniVoiceDACResidualUnit
+    @ModuleInfo(key: "res_unit1") var resUnit1: OmniVoiceDACResidualUnit
+    @ModuleInfo(key: "res_unit2") var resUnit2: OmniVoiceDACResidualUnit
+    @ModuleInfo(key: "res_unit3") var resUnit3: OmniVoiceDACResidualUnit
 
     init(inputChannels: Int, outputChannels: Int, stride: Int, kernelSize: Int) {
-        self._snake1.wrappedValue = snakeAlpha(channels: inputChannels)
+        self._snake1.wrappedValue = SnakeAlpha(channels: inputChannels)
         self._convT1.wrappedValue = OmniVoiceConvTranspose1d(
             inChannels: inputChannels,
             outChannels: outputChannels,
@@ -1244,22 +1228,22 @@ public final class OmniVoiceDACUpBlock: Module {
             padding: stride / 2 + stride % 2,
             outputPadding: stride % 2
         )
-        self._res_unit1.wrappedValue = OmniVoiceDACResidualUnit(
+        self._resUnit1.wrappedValue = OmniVoiceDACResidualUnit(
             channels: outputChannels, kernelSize: kernelSize, dilation: 1
         )
-        self._res_unit2.wrappedValue = OmniVoiceDACResidualUnit(
+        self._resUnit2.wrappedValue = OmniVoiceDACResidualUnit(
             channels: outputChannels, kernelSize: kernelSize, dilation: 3
         )
-        self._res_unit3.wrappedValue = OmniVoiceDACResidualUnit(
+        self._resUnit3.wrappedValue = OmniVoiceDACResidualUnit(
             channels: outputChannels, kernelSize: kernelSize, dilation: 9
         )
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         var h = convT1(snake1.callAsFunction(x))
-        h = res_unit1(h)
-        h = res_unit2(h)
-        h = res_unit3(h)
+        h = resUnit1(h)
+        h = resUnit2(h)
+        h = resUnit3(h)
         return h
     }
 }
@@ -1268,7 +1252,7 @@ public final class OmniVoiceDACUpBlock: Module {
 public final class OmniVoiceDACAcousticEncoder: Module {
     @ModuleInfo(key: "conv1") var conv1: OmniVoiceConv1d
     @ModuleInfo var block: [OmniVoiceDACDownBlock]
-    @ModuleInfo(key: "snake1") var snake1: snakeAlpha
+    @ModuleInfo(key: "snake1") var snake1: SnakeAlpha
     @ModuleInfo(key: "conv2") var conv2: OmniVoiceConv1d
 
     init(config: OmniVoiceAudioTokenizerConfig) {
@@ -1297,7 +1281,7 @@ public final class OmniVoiceDACAcousticEncoder: Module {
         }
         self._block.wrappedValue = blocks
 
-        self._snake1.wrappedValue = snakeAlpha(channels: currentChannels)
+        self._snake1.wrappedValue = SnakeAlpha(channels: currentChannels)
         self._conv2.wrappedValue = OmniVoiceConv1d(
             inChannels: currentChannels,
             outChannels: currentChannels / 8,   // 2048 → 256 to match checkpoint
@@ -1321,7 +1305,7 @@ public final class OmniVoiceDACAcousticEncoder: Module {
 public final class OmniVoiceDACAcousticDecoder: Module {
     @ModuleInfo(key: "conv1") var conv1: OmniVoiceConv1d
     @ModuleInfo var block: [OmniVoiceDACUpBlock]
-    @ModuleInfo(key: "snake1") var snake1: snakeAlpha
+    @ModuleInfo(key: "snake1") var snake1: SnakeAlpha
     @ModuleInfo(key: "conv2") var conv2: OmniVoiceConv1d
 
     init(config: OmniVoiceAudioTokenizerConfig) {
@@ -1351,7 +1335,7 @@ public final class OmniVoiceDACAcousticDecoder: Module {
         }
         self._block.wrappedValue = blocks
 
-        self._snake1.wrappedValue = snakeAlpha(channels: currentChannels)
+        self._snake1.wrappedValue = SnakeAlpha(channels: currentChannels)
         self._conv2.wrappedValue = OmniVoiceConv1d(
             inChannels: currentChannels,
             outChannels: 1,
@@ -1637,7 +1621,7 @@ public final class OmniVoiceAudioTokenizer: Module {
                     k = String(k.dropLast("weight".count)) + "embed"
                 }
                 // NOTE: checkpoint alpha is [1,1,C] for NLC; Swift DAC uses NCL,
-                // so we reshape at runtime in snakeAlpha.callAsFunction instead.
+                // so we reshape at runtime in SnakeAlpha.callAsFunction instead.
                 // NOTE: we do NOT transpose 3D conv weights here because
                 // OmniVoiceConv1d and OmniVoiceConvTranspose1d already
                 // transpose from PyTorch [out,in,k] / [in,out,k] to MLX
@@ -1739,7 +1723,7 @@ public final class OmniVoiceAudioTokenizer: Module {
         if !extra.isEmpty {
             print("[OmniVoiceAudioTokenizer] WARNING: \(extra.count) extra keys in checkpoint: \(extra.prefix(10))")
         }
-        
+
         // Codec weights run as float32 (reference checkpoint ships fp32).
         let float32Weights = weights.mapValues { $0.asType(.float32) }
         try tokenizer.update(parameters: ModuleParameters.unflattened(float32Weights), verify: .noUnusedKeys)

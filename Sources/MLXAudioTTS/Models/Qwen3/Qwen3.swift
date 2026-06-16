@@ -228,8 +228,7 @@ public class Qwen3TransformerBlock: Module {
         var r = attention(inputLayerNorm(x), mask: mask, cache: cache)
         let h = x + r
         r = mlp(postAttentionLayerNorm(h))
-        let out = h + r
-        return out
+        return h + r
     }
 }
 
@@ -245,7 +244,7 @@ public class Qwen3ModelInner: Module {
         _embedTokens.wrappedValue = Embedding(
             embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
 
-        self.layers = (0 ..< args.hiddenLayers)
+        self.layers = (0..<args.hiddenLayers)
             .map { _ in
                 Qwen3TransformerBlock(args)
             }
@@ -283,7 +282,7 @@ public class Qwen3Model: Module, KVCacheDimensionProvider, SpeechGenerationModel
     public init(_ args: Qwen3Configuration) {
         self.configuration = args
         self.vocabularySize = args.vocabularySize
-        self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
+        self.kvHeads = (0..<args.hiddenLayers).map { _ in args.kvHeads }
         self.model = Qwen3ModelInner(args)
 
         if !args.tieWordEmbeddings {

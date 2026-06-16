@@ -85,7 +85,8 @@ public struct Qwen3Configuration: Codable, Sendable {
         ropeScaling: [String: StringOrNumber]? = nil,
         tieWordEmbeddings: Bool = false,
         sampleRate: Int = 24_000,
-        eosTokenId: Int = 151645
+        eosTokenId: Int = 151645,
+        maxPositionEmbeddings: Int = 32768
     ) {
         self.hiddenSize = hiddenSize
         self.hiddenLayers = hiddenLayers
@@ -100,7 +101,7 @@ public struct Qwen3Configuration: Codable, Sendable {
         self.tieWordEmbeddings = tieWordEmbeddings
         self.sampleRate = sampleRate
         self.eosTokenId = eosTokenId
-        self.maxPositionEmbeddings = 40960
+        self.maxPositionEmbeddings = maxPositionEmbeddings
         self.quantization = nil
         self.perLayerQuantization = nil
         self.tokenizer_name = nil
