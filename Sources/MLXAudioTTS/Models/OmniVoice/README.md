@@ -5,10 +5,9 @@ Swift/MLX port of [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice), a
 ## Weights
 
 Use the full conversion `mlx-community/OmniVoice` (fp32, includes the complete
-audio tokenizer). `mlx-community/OmniVoice-bf16` ships a stripped tokenizer
-(no `semantic_model.*` weights) and a different fused embedding layout; both
-layouts are supported by the loader, but the stripped tokenizer cannot encode
-reference audio.
+audio codec). The `mlx-community/OmniVoice-bf16` repo's `audio_tokenizer/` was
+exported without the semantic encode path (no `semantic_model.*` /
+`encoder_semantic.*` weights), so it cannot encode reference audio.
 
 ## Usage
 
