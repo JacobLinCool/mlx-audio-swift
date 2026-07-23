@@ -318,9 +318,11 @@ public final class MossTranscribeDiarizeModel: Module, STTGenerationModel {
             minChunkDuration: generationParameters.minChunkDuration,
             repetitionPenalty: generationParameters.repetitionPenalty,
             repetitionContextSize: generationParameters.repetitionContextSize,
+            prompt: generationParameters.prompt,
             kvBits: generationParameters.kvBits,
             kvGroupSize: generationParameters.kvGroupSize,
-            quantizedKVStart: generationParameters.quantizedKVStart
+            quantizedKVStart: generationParameters.quantizedKVStart,
+            logprobsTopK: generationParameters.logprobsTopK
         )
     }
 
@@ -357,11 +359,12 @@ public final class MossTranscribeDiarizeModel: Module, STTGenerationModel {
                             temperature: generationParameters.temperature,
                             repetitionPenalty: generationParameters.repetitionPenalty,
                             repetitionContextSize: generationParameters.repetitionContextSize,
-                            prompt: nil,
+                            prompt: generationParameters.prompt,
                             offsetSeconds: Double(offsetSeconds),
                             kvBits: generationParameters.kvBits,
                             kvGroupSize: generationParameters.kvGroupSize,
-                            quantizedKVStart: generationParameters.quantizedKVStart
+                            quantizedKVStart: generationParameters.quantizedKVStart,
+                            logprobsTopK: generationParameters.logprobsTopK
                         ) { text in
                             guard !text.isEmpty else { return }
                             if !emittedText {
@@ -413,7 +416,8 @@ public final class MossTranscribeDiarizeModel: Module, STTGenerationModel {
         prompt: String? = nil,
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
-        quantizedKVStart: Int = 0
+        quantizedKVStart: Int = 0,
+        logprobsTopK: Int = 0
     ) -> STTOutput {
         let start = Date()
         do {
@@ -438,7 +442,8 @@ public final class MossTranscribeDiarizeModel: Module, STTGenerationModel {
                     offsetSeconds: Double(offsetSeconds),
                     kvBits: kvBits,
                     kvGroupSize: kvGroupSize,
-                    quantizedKVStart: quantizedKVStart
+                    quantizedKVStart: quantizedKVStart,
+                    logprobsTopK: logprobsTopK
                 )
                 outputs.append(output)
                 Memory.clearCache()
@@ -635,6 +640,7 @@ private extension MossTranscribeDiarizeModel {
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
         quantizedKVStart: Int = 0,
+        logprobsTopK: Int = 0,
         onText: ((String) -> Void)? = nil
     ) throws -> STTOutput {
         defer { Memory.clearCache() }
@@ -645,7 +651,7 @@ private extension MossTranscribeDiarizeModel {
         let prefillTime = Date().timeIntervalSince(prefillStart)
         let genStart = Date()
         var offsetter = MossTimestampTagOffsetter(offsetSeconds: offsetSeconds)
-        let generatedTokens = try generateTokenIds(
+        let (generatedTokens, tokenLogprobs) = try generateTokenIds(
             promptIds: prepared.promptIds,
             inputEmbeddings: prepared.inputEmbeddings,
             maxTokens: maxTokens,
@@ -654,7 +660,8 @@ private extension MossTranscribeDiarizeModel {
             repetitionContextSize: repetitionContextSize,
             kvBits: kvBits,
             kvGroupSize: kvGroupSize,
-            quantizedKVStart: quantizedKVStart
+            quantizedKVStart: quantizedKVStart,
+            logprobsTopK: logprobsTopK
         ) { token in
             let rawDelta = self.tokenizer?.decode(tokens: [token], skipSpecialTokens: true) ?? ""
             let shiftedDelta = offsetter.consume(rawDelta)
@@ -685,7 +692,8 @@ private extension MossTranscribeDiarizeModel {
             promptTps: prefillTime > 0 ? Double(prepared.promptTokenCount) / prefillTime : 0,
             generationTps: genTime > 0 ? Double(generatedTokens.count) / genTime : 0,
             totalTime: totalTime,
-            peakMemoryUsage: Double(Memory.peakMemory) / 1e9
+            peakMemoryUsage: Double(Memory.peakMemory) / 1e9,
+            tokenLogprobs: tokenLogprobs
         )
     }
 
@@ -703,8 +711,14 @@ private extension MossTranscribeDiarizeModel {
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
         quantizedKVStart: Int = 0,
+        logprobsTopK: Int = 0,
         onToken: ((Int) -> Void)? = nil
-    ) throws -> [Int] {
+    ) throws -> (tokens: [Int], logprobs: [TokenLogprobs]?) {
+        let captureLogprobs = logprobsTopK > 0
+        var capturedLogprobs: [TokenLogprobs] = []
+        // Log-probs of the token about to be emitted, computed from the same
+        // decision logits that `argMax` picks it from (greedy → top-1 == emitted).
+        var pendingLogprobs: TokenLogprobs?
         var cache = makeCache()
         // Quantized prefill attention is unfused; its transient scores tensor
         // scales with chunk size, so a smaller chunk bounds the memory spike.
@@ -742,6 +756,9 @@ private extension MossTranscribeDiarizeModel {
         }
         var nextTokenArray = lastLogits.argMax(axis: -1)
         asyncEval(nextTokenArray)
+        if captureLogprobs {
+            pendingLogprobs = topKLogprobs(from: lastLogits, k: logprobsTopK)
+        }
 
         // Covers prompts short enough that the chunk loop never ran.
         maybeQuantizeKVCache(
@@ -762,6 +779,9 @@ private extension MossTranscribeDiarizeModel {
                 break
             }
             generated.append(token)
+            if captureLogprobs, let pending = pendingLogprobs {
+                capturedLogprobs.append(pending)
+            }
             onToken?(token)
 
             if repetitionPenalty == 1.0 && generated.count >= 24 {
@@ -793,12 +813,41 @@ private extension MossTranscribeDiarizeModel {
             }
             nextTokenArray = lastLogits.argMax(axis: -1)
             asyncEval(nextTokenArray)
+            if captureLogprobs {
+                pendingLogprobs = topKLogprobs(from: lastLogits, k: logprobsTopK)
+            }
 
             if tokenIndex > 0 && tokenIndex % 256 == 0 {
                 Memory.clearCache()
             }
         }
-        return generated
+        return (generated, captureLogprobs ? capturedLogprobs : nil)
+    }
+
+    /// Top-K log-probabilities (log-softmax over the full vocabulary) for one decode
+    /// step. `decisionLogits` is the `(1, vocab)` (or `(vocab,)`) row that `argMax`
+    /// selects from, so element 0 of the result is the token actually emitted.
+    func topKLogprobs(from decisionLogits: MLXArray, k: Int) -> TokenLogprobs {
+        let flat = decisionLogits.reshaped([-1])
+        let vocab = flat.dim(0)
+        let kk = max(1, min(k, vocab))
+        let logProbs = flat - logSumExp(flat)
+        // argPartition places the top-kk indices in the trailing kk positions.
+        let partitioned = argPartition(logProbs, kth: vocab - kk, axis: -1)
+        let topIdx = partitioned[(vocab - kk)...]
+        let topVals = logProbs[topIdx]
+        let orderAsc = argSort(topVals, axis: -1)
+        eval(topIdx, topVals, orderAsc)
+        let ids = topIdx.asArray(Int32.self)
+        let vals = topVals.asArray(Float.self)
+        let order = orderAsc.asArray(Int32.self)
+        var top: [TokenLogprob] = []
+        top.reserveCapacity(kk)
+        for j in stride(from: kk - 1, through: 0, by: -1) {
+            let pos = Int(order[j])
+            top.append(TokenLogprob(token: Int(ids[pos]), logprob: vals[pos]))
+        }
+        return TokenLogprobs(token: top[0].token, logprob: top[0].logprob, topLogprobs: top)
     }
 }
 
@@ -837,6 +886,8 @@ extension MossTranscribeDiarizeModel {
         let generationTokens = outputs.reduce(0) { $0 + $1.generationTokens }
         let totalTokens = outputs.reduce(0) { $0 + $1.totalTokens }
         let peakMemoryUsage = outputs.map(\.peakMemoryUsage).max() ?? 0
+        let chunkLogprobs = outputs.compactMap(\.tokenLogprobs)
+        let tokenLogprobs = chunkLogprobs.isEmpty ? nil : Array(chunkLogprobs.joined())
 
         return STTOutput(
             text: text,
@@ -847,7 +898,8 @@ extension MossTranscribeDiarizeModel {
             promptTps: totalTime > 0 ? Double(promptTokens) / totalTime : 0,
             generationTps: totalTime > 0 ? Double(generationTokens) / totalTime : 0,
             totalTime: totalTime,
-            peakMemoryUsage: peakMemoryUsage
+            peakMemoryUsage: peakMemoryUsage,
+            tokenLogprobs: tokenLogprobs
         )
     }
 

@@ -74,6 +74,43 @@ public enum STTError: Error, LocalizedError {
     }
 }
 
+// MARK: - Token Log-Probabilities
+
+/// A single candidate token and its log-probability at one decode step.
+public struct TokenLogprob: Sendable {
+    /// Token id in the model vocabulary.
+    public let token: Int
+    /// Natural-log probability (log-softmax over the full vocabulary).
+    public let logprob: Float
+
+    public init(token: Int, logprob: Float) {
+        self.token = token
+        self.logprob = logprob
+    }
+}
+
+/// The decode-step distribution for one generated token: the token actually
+/// chosen plus the top-K candidates it competed against.
+///
+/// For MOSS-Transcribe-Diarize a speaker label `[S01]` is emitted as the tokens
+/// `[S`, `0`, `1`, `]`, so the speaker choice surfaces here as the distribution
+/// over digit tokens at the digit position — e.g. a near-tie between `1` (→S01)
+/// and `2` (→S02) marks two acoustically close speakers.
+public struct TokenLogprobs: Sendable {
+    /// The token id that was emitted at this step.
+    public let token: Int
+    /// Log-probability of the emitted token.
+    public let logprob: Float
+    /// Top-K candidates (including the emitted token), highest probability first.
+    public let topLogprobs: [TokenLogprob]
+
+    public init(token: Int, logprob: Float, topLogprobs: [TokenLogprob]) {
+        self.token = token
+        self.logprob = logprob
+        self.topLogprobs = topLogprobs
+    }
+}
+
 // MARK: - STT Output
 
 /// Output from speech-to-text transcription.
@@ -108,6 +145,11 @@ public struct STTOutput: @unchecked Sendable {
     /// Peak memory usage in GB.
     public let peakMemoryUsage: Double
 
+    /// Per-generated-token top-K log-probabilities, aligned 1:1 with the generated
+    /// tokens in order. Populated only when `STTGenerateParameters.logprobsTopK > 0`;
+    /// `nil` otherwise.
+    public let tokenLogprobs: [TokenLogprobs]?
+
     public init(
         text: String,
         segments: [[String: Any]]? = nil,
@@ -118,7 +160,8 @@ public struct STTOutput: @unchecked Sendable {
         promptTps: Double = 0.0,
         generationTps: Double = 0.0,
         totalTime: Double = 0.0,
-        peakMemoryUsage: Double = 0.0
+        peakMemoryUsage: Double = 0.0,
+        tokenLogprobs: [TokenLogprobs]? = nil
     ) {
         self.text = text
         self.segments = segments
@@ -130,6 +173,7 @@ public struct STTOutput: @unchecked Sendable {
         self.generationTps = generationTps
         self.totalTime = totalTime
         self.peakMemoryUsage = peakMemoryUsage
+        self.tokenLogprobs = tokenLogprobs
     }
 }
 

@@ -75,6 +75,8 @@ private struct Options {
     var frameThreshold = 25
     var stream = false
     var context: String? = nil
+    var prompt: String? = nil
+    var logprobsTopK = 0
     var prefillStepSize = 2048
     var genKwargsRaw: String? = nil
     var text = ""
@@ -129,6 +131,13 @@ private struct Options {
             case "--context":
                 guard let v = it.next() else { throw CLIError.missingValue(arg) }
                 options.context = v
+            case "--prompt":
+                guard let v = it.next() else { throw CLIError.missingValue(arg) }
+                options.prompt = v
+            case "--logprobs-top-k":
+                guard let v = it.next() else { throw CLIError.missingValue(arg) }
+                guard let value = Int(v) else { throw CLIError.invalidValue(arg, v) }
+                options.logprobsTopK = value
             case "--prefill-step-size":
                 guard let v = it.next() else { throw CLIError.missingValue(arg) }
                 guard let value = Int(v) else { throw CLIError.invalidValue(arg, v) }
@@ -232,6 +241,9 @@ private struct Options {
               --frame-threshold <int>       Accepted for compatibility (currently unused). Default: 25
               --stream                      Stream token output while generating
               --context <text>              Accepted for compatibility (currently unused)
+              --prompt <text>               Custom decoding prompt (MOSS-Transcribe-Diarize: carries
+                                            hotword hints / instructions; replaces the default prompt)
+              --logprobs-top-k <int>        Capture top-K per-token log-probs into JSON output. Default: 0 (off)
               --prefill-step-size <int>     Accepted for compatibility (currently unused). Default: 2048
               --gen-kwargs <json>           Additional kwargs JSON.
                                             Recognized keys: max_tokens, language, chunk_duration,
@@ -305,7 +317,9 @@ enum App {
                 chunkDuration: options.chunkDuration,
                 minChunkDuration: options.minChunkDuration ?? params.minChunkDuration,
                 repetitionPenalty: options.repetitionPenalty ?? params.repetitionPenalty,
-                repetitionContextSize: options.repetitionContextSize ?? params.repetitionContextSize
+                repetitionContextSize: options.repetitionContextSize ?? params.repetitionContextSize,
+                prompt: options.prompt,
+                logprobsTopK: options.logprobsTopK
             )
 
             if options.stream {
@@ -498,7 +512,7 @@ enum App {
             try renderVTT(segments: segments).write(to: url, atomically: true, encoding: .utf8)
         case .json:
             let url = outputURL(stem: outputPathStem, ext: "json")
-            let jsonObject: [String: Any] = [
+            var jsonObject: [String: Any] = [
                 "text": output.text,
                 "segments": (segments ?? []).map {
                     [
@@ -517,6 +531,15 @@ enum App {
                 "total_time": output.totalTime,
                 "peak_memory_usage": output.peakMemoryUsage,
             ]
+            if let tokenLogprobs = output.tokenLogprobs {
+                jsonObject["token_logprobs"] = tokenLogprobs.map { step in
+                    [
+                        "token": step.token,
+                        "logprob": step.logprob,
+                        "top": step.topLogprobs.map { ["token": $0.token, "logprob": $0.logprob] },
+                    ]
+                }
+            }
             let data = try JSONSerialization.data(withJSONObject: jsonObject, options: [.prettyPrinted])
             try data.write(to: url)
         }

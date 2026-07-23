@@ -17,6 +17,13 @@ public struct STTGenerateParameters: Sendable {
     public let kvGroupSize: Int
     /// Cache offset that must be exceeded before the KV cache is quantized.
     public let quantizedKVStart: Int
+    /// Decoding instruction/prompt. Models that support prompting (e.g. MOSS-Transcribe-Diarize,
+    /// where it carries hotword hints and custom instructions) use this in place of their default
+    /// prompt; models without prompt support ignore it. `nil` keeps the model default.
+    public let prompt: String?
+    /// When > 0, capture the top-K log-probabilities for every generated token
+    /// (see `STTOutput.tokenLogprobs`). `0` disables capture and adds no overhead.
+    public let logprobsTopK: Int
 
     public init(
         maxTokens: Int = 8192,
@@ -31,7 +38,9 @@ public struct STTGenerateParameters: Sendable {
         repetitionContextSize: Int = 32,
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
-        quantizedKVStart: Int = 0
+        quantizedKVStart: Int = 0,
+        prompt: String? = nil,
+        logprobsTopK: Int = 0
     ) {
         self.maxTokens = maxTokens
         self.temperature = temperature
@@ -46,6 +55,8 @@ public struct STTGenerateParameters: Sendable {
         self.kvBits = kvBits
         self.kvGroupSize = kvGroupSize
         self.quantizedKVStart = quantizedKVStart
+        self.prompt = prompt
+        self.logprobsTopK = logprobsTopK
     }
 }
 
